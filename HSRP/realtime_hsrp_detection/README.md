@@ -7,6 +7,7 @@ This system allows real-time detection of license plates (ordinary and HSRP) usi
 - Real-time license plate detection using webcam
 - Video file processing
 - Automatic saving of detected license plates
+- Character analysis for ordinary license plates (no external dependencies)
 - Optimized detection with temporal smoothing
 - Background cooldown period for stable detection
 - Minimal, clean display showing only current detection type
@@ -87,11 +88,23 @@ The detector shows a clean, minimal interface:
 - Current detection type (HSRP or Ordinary) displayed at the bottom of the screen
 - Progress bar for video playback (video mode only)
 
+### License Plate Character Analysis
+
+- When an ordinary license plate is detected, the system analyzes it to count potential characters
+- The analysis is shown in the terminal/console only (not on the video screen)
+- The system creates and saves an analysis image showing identified character regions
+- HSRP plates are not analyzed (only ordinary plates)
+
 ## Output
 
-Detected license plates will be saved to the `detections/` folder with the following naming format:
+Detected license plates will be saved to the `detections/` folder with the following naming formats:
+
 ```
+# Original plate images:
 [class_name]_[timestamp]_[confidence].jpg
+
+# Analysis images (for ordinary plates):
+analysis_[timestamp].jpg
 ```
 
-Example: `hsrp_20230527_153045_0.89.jpg` 
+Example: `ordinary_20230527_153045_0.89.jpg` 

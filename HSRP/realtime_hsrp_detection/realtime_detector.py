@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 from collections import deque
 from ultralytics import YOLO
+import re
 
 class RealtimeHSRPDetector:
     def __init__(self, model_path, confidence=0.5, cooldown_time=1.0, device="cuda"):
@@ -61,6 +62,9 @@ class RealtimeHSRPDetector:
         self.last_boxes = []
         self.smooth_detections = deque(maxlen=3)  # For temporal smoothing
         
+        # For license plates
+        self.processed_plates = set()  # To avoid reprocessing the same plate
+        
     def _load_class_names(self):
         """Load class names from classes.txt file"""
         classes_path = self.script_dir / "classes.txt"
@@ -70,6 +74,61 @@ class RealtimeHSRPDetector:
         with open(classes_path, 'r') as f:
             class_names = [line.strip() for line in f if line.strip()]
             return class_names
+    
+    def _analyze_plate_image(self, plate_img):
+        """
+        Basic analysis of license plate image
+        Uses computer vision techniques instead of OCR for more reliability
+        """
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+            
+            # Apply adaptive thresholding
+            thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            
+            # Find contours - these could be characters on the plate
+            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Filter contours by size to find potential characters
+            char_contours = []
+            h, w = gray.shape
+            min_char_height = h * 0.4  # Min height for a character
+            max_char_height = h * 0.9  # Max height for a character
+            min_char_width = w * 0.02  # Min width for a character
+            max_char_width = w * 0.15  # Max width for a character
+            
+            for contour in contours:
+                x, y, cw, ch = cv2.boundingRect(contour)
+                aspect_ratio = ch / cw if cw > 0 else 0
+                
+                # Filter contours that might be characters
+                if (min_char_height < ch < max_char_height and 
+                    min_char_width < cw < max_char_width and
+                    0.8 < aspect_ratio < 5.0):  # Most characters/digits have this aspect ratio range
+                    char_contours.append(contour)
+            
+            # Count potential characters
+            char_count = len(char_contours)
+            
+            # Draw the potential character contours on a copy of the plate image
+            plate_with_contours = plate_img.copy()
+            cv2.drawContours(plate_with_contours, char_contours, -1, (0, 255, 0), 2)
+            
+            # Save the analysis image
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            analysis_path = self.output_dir / f"analysis_{timestamp}.jpg"
+            cv2.imwrite(str(analysis_path), plate_with_contours)
+            
+            # Indian license plates typically have 8-10 characters
+            if 5 <= char_count <= 12:
+                return f"~{char_count} characters", analysis_path
+            else:
+                return None, analysis_path
+                
+        except Exception as e:
+            print(f"Error in plate analysis: {e}")
+            return None, None
         
     def process_frame(self, frame):
         """
@@ -171,6 +230,24 @@ class RealtimeHSRPDetector:
                         self.hsrp_count += 1
                     else:
                         self.ordinary_count += 1
+                        
+                        # Analyze only ordinary license plates
+                        if plate_id not in self.processed_plates:
+                            self.processed_plates.add(plate_id)
+                            
+                            # Analyze the plate image
+                            char_count, analysis_path = self._analyze_plate_image(plate_img)
+                            if char_count:
+                                print("\n" + "="*50)
+                                print(f"DETECTED ORDINARY LICENSE PLATE")
+                                print(f"Estimated characters: {char_count}")
+                                print(f"Confidence: {conf:.2f}")
+                                print(f"Plate saved to: {save_path}")
+                                if analysis_path:
+                                    print(f"Analysis image: {analysis_path}")
+                                print("="*50 + "\n")
+                            else:
+                                print(f"Could not analyze ordinary license plate (conf: {conf:.2f})")
                     
                     # Print detection info
                     print(f"Detected {class_name} plate with {conf:.2f} confidence")
