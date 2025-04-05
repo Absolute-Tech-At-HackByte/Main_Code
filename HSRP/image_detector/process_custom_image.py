@@ -3,7 +3,7 @@ import sys
 import time
 import cv2
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 from pathlib import Path
 
 # Add parent directory to Python path
@@ -67,6 +67,12 @@ def select_image():
 
 def select_model():
     """Find available models and let user select one"""
+    # First check for the model in the current directory
+    local_model_path = os.path.join(script_dir, "best.pt")
+    if os.path.exists(local_model_path):
+        print(f"Using model from current directory: best.pt")
+        return local_model_path
+        
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     # Find trained models
@@ -113,12 +119,18 @@ def main():
         print("Model selection canceled or no models available.")
         return
     
+    # Set Gemini API key directly
+    gemini_api_key = "AIzaSyAbaKjFDO5hvcOhb99h_2F9oH5uzrzY6FY"  # Replace with your actual API key
+    use_gemini = True
+    print("Using Gemini AI for OCR to extract license plate text")
+    
     # Initialize detector
     try:
         detector = LicensePlateDetector(
             model_path=model_path,
             device="0" if LicensePlateDetector.is_cuda_available() else "cpu",
-            conf_threshold=0.3
+            conf_threshold=0.3,
+            gemini_api_key=gemini_api_key
         )
     except Exception as e:
         print(f"Error initializing detector: {e}")
@@ -148,7 +160,8 @@ def main():
             annotated_img, plate_images, plate_info = detector.process_image(
                 image_path,
                 save_path=output_path,
-                show_result=True  # Show the result immediately
+                show_result=True,  # Show the result immediately
+                use_ocr=use_gemini  # Use OCR if Gemini is enabled
             )
             elapsed_time = time.time() - start_time
             
@@ -158,6 +171,8 @@ def main():
             
             for i, info in enumerate(plate_info):
                 print(f"  Plate {i+1}: {info['type']} (confidence: {info['confidence']:.2f})")
+                if 'plate_text' in info and info['plate_text']:
+                    print(f"    Text: {info['plate_text']}")
             
             print(f"\nOutput saved to: {output_path}")
             

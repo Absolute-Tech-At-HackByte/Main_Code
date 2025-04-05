@@ -6,9 +6,12 @@ from pathlib import Path
 from ultralytics import YOLO
 import argparse
 import time
+import google.generativeai as genai
+from PIL import Image
+import io
 
 class LicensePlateDetector:
-    def __init__(self, model_path, device='0', conf_threshold=0.5):
+    def __init__(self, model_path, device='0', conf_threshold=0.5, gemini_api_key=None):
         """
         Initialize the License Plate Detector
         
@@ -16,6 +19,7 @@ class LicensePlateDetector:
             model_path: Path to the trained YOLOv8 model
             device: Device to run inference on ('0' for GPU, 'cpu' for CPU)
             conf_threshold: Confidence threshold for detections
+            gemini_api_key: API key for Google's Gemini AI model for OCR
         """
         # Check if CUDA is available when device is set to GPU
         if device != 'cpu' and not torch.cuda.is_available():
@@ -32,6 +36,18 @@ class LicensePlateDetector:
         # Class names
         self.class_names = ['ordinary', 'hsrp']
         self.class_colors = [(0, 255, 0), (0, 0, 255)]  # Green for ordinary, Blue for HSRP
+        
+        # Initialize Gemini for OCR if API key is provided
+        self.gemini_available = False
+        if gemini_api_key:
+            try:
+                genai.configure(api_key=gemini_api_key)
+                # Update to use Gemini 1.5 Flash instead of pro-vision (which is deprecated)
+                self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+                self.gemini_available = True
+                print("Gemini OCR initialized successfully")
+            except Exception as e:
+                print(f"Error initializing Gemini OCR: {e}")
         
     @staticmethod
     def is_cuda_available():
@@ -103,19 +119,61 @@ class LicensePlateDetector:
             plate_info.append({
                 'type': class_name,
                 'confidence': conf,
-                'bbox': (x1, y1, x2, y2)
+                'bbox': (x1, y1, x2, y2),
+                'plate_text': None  # Will be filled by OCR if available
             })
             
         return plate_images, plate_info
+
+    def extract_text_with_gemini(self, plate_image):
+        """
+        Extract text from license plate image using Gemini Vision API
+        
+        Args:
+            plate_image: Cropped license plate image (numpy array)
+            
+        Returns:
+            plate_text: Extracted text from license plate
+        """
+        if not self.gemini_available:
+            return None
+            
+        try:
+            # Convert OpenCV image (numpy array) to PIL Image
+            pil_image = Image.fromarray(cv2.cvtColor(plate_image, cv2.COLOR_BGR2RGB))
+            
+            # Create byte stream for image
+            byte_stream = io.BytesIO()
+            pil_image.save(byte_stream, format='JPEG')
+            byte_stream.seek(0)
+            
+            # Prepare prompt for Gemini
+            prompt = """
+            Extract the license plate number from this image. 
+            Return ONLY the text content of the license plate without any additional text or explanations.
+            If no text is clearly visible, respond with 'UNREADABLE'.
+            """
+            
+            # Generate response from Gemini Vision
+            response = self.gemini_model.generate_content([prompt, {"mime_type": "image/jpeg", "data": byte_stream.getvalue()}])
+            
+            # Get plate text
+            plate_text = response.text.strip()
+            return plate_text
+            
+        except Exception as e:
+            print(f"Error in Gemini OCR: {e}")
+            return None
     
-    def process_image(self, image, show_result=True, save_path=None):
+    def process_image(self, image, show_result=True, save_path=None, use_ocr=True):
         """
         Process an image to detect and extract license plates
         
         Args:
             image: Input image (file path or numpy array)
-            show_result: Whether to display the result
+            show_result: Whether to attempt displaying the result (may not work in all environments)
             save_path: Path to save the result (None to not save)
+            use_ocr: Whether to use OCR to extract text from license plates
             
         Returns:
             annotated_img: Image with detection annotations
@@ -135,18 +193,37 @@ class LicensePlateDetector:
         # Extract license plate regions
         plate_images, plate_info = self.extract_license_plates(image, results)
         
-        # Display results
-        if show_result:
-            cv2.imshow("License Plate Detection", annotated_img)
-            
-            # Display each detected plate
-            for i, (plate_img, info) in enumerate(zip(plate_images, plate_info)):
+        # Extract text using Gemini OCR if available and enabled
+        if use_ocr and self.gemini_available:
+            for i, plate_img in enumerate(plate_images):
                 if plate_img.size > 0:
-                    plate_title = f"{info['type']} ({info['confidence']:.2f})"
-                    cv2.imshow(f"Plate {i+1}: {plate_title}", plate_img)
-            
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
+                    print(f"Extracting text from plate {i+1}...")
+                    plate_text = self.extract_text_with_gemini(plate_img)
+                    plate_info[i]['plate_text'] = plate_text
+                    
+                    # Add text to the annotated image
+                    if plate_text:
+                        x1, y1, x2, y2 = plate_info[i]['bbox']
+                        cv2.putText(
+                            annotated_img,
+                            f"Text: {plate_text}",
+                            (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (0, 255, 255),
+                            2
+                        )
+        
+        # Skip displaying with OpenCV as it might not be supported in all environments
+        # Instead just print the detection info
+        if show_result:
+            print("\nDetection Results:")
+            print(f"- Found {len(plate_images)} license plates")
+            for i, info in enumerate(plate_info):
+                plate_title = f"Plate {i+1}: {info['type']} (confidence: {info['confidence']:.2f})"
+                if info.get('plate_text'):
+                    plate_title += f" - Text: {info['plate_text']}"
+                print(f"- {plate_title}")
             
         # Save results if path is provided
         if save_path is not None:
@@ -156,13 +233,34 @@ class LicensePlateDetector:
             save_dir = Path(save_path).parent / "plates"
             save_dir.mkdir(exist_ok=True)
             
-            for i, (plate_img, info) in enumerate(zip(plate_images, plate_info)):
-                if plate_img.size > 0:
-                    plate_type = info['type']
-                    conf = info['confidence']
-                    plate_filename = Path(save_path).stem
-                    plate_save_path = save_dir / f"{plate_filename}_plate{i+1}_{plate_type}_{conf:.2f}.jpg"
-                    cv2.imwrite(str(plate_save_path), plate_img)
+            # Create a CSV file to store plate data
+            detection_data_file = Path(save_path).parent / "plate_detections.csv"
+            is_new_file = not detection_data_file.exists()
+            
+            with open(detection_data_file, 'a') as f:
+                # Write header if it's a new file
+                if is_new_file:
+                    f.write("image_name,plate_number,plate_type,confidence,plate_text\n")
+                
+                # Write plate info
+                image_name = Path(save_path).name
+                for i, (plate_img, info) in enumerate(zip(plate_images, plate_info)):
+                    if plate_img.size > 0:
+                        plate_type = info['type']
+                        conf = info['confidence']
+                        plate_text = info.get('plate_text', 'N/A')
+                        
+                        # Write to CSV
+                        f.write(f"{image_name},{i+1},{plate_type},{conf:.2f},{plate_text}\n")
+                        
+                        # Save plate image
+                        plate_filename = Path(save_path).stem
+                        plate_save_path = save_dir / f"{plate_filename}_plate{i+1}_{plate_type}_{conf:.2f}.jpg"
+                        cv2.imwrite(str(plate_save_path), plate_img)
+            
+            print(f"\nResults saved to {save_path}")
+            print(f"Plate images saved to {save_dir}")
+            print(f"Detection data saved to {detection_data_file}")
             
         return annotated_img, plate_images, plate_info
     
